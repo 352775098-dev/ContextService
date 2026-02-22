@@ -21,6 +21,90 @@
 
 
 # 上下文工程的逻辑架构
+@startuml
+!define RECTANGLE class
+
+skinparam componentStyle rectangle
+left to right direction
+
+package "上下文工程" {
+
+  rectangle "接口层" {
+    component "写入QA" as writeQA
+    component "查询上下文" as queryContext
+    component "重建上下文" as rebuildContext
+    component "删除上下文" as deleteContext
+  }
+
+  rectangle "上下文管理层" {
+    component "保存" as save
+    component "压缩" as compress
+    component "老化" as aging
+    component "关联" as relate
+    component "记忆" as memorize
+    component "组装" as assemble
+    component "结构化模板" as template
+  }
+
+  rectangle "上下文数据层" {
+    component "私有上下文" as privateCtx
+    component "公共上下文" as publicCtx
+    component "原始对话" as rawChat
+    component "压缩内容" as compressed
+    component "长期记忆" as longTermMemory
+    component "工具结果" as toolResult
+  }
+
+  rectangle "基础组件层" {
+    component "RAG" as rag
+    component "长期记忆" as longTermBase
+    component "工具" as tool
+    component "模型推理" as inference
+  }
+
+}
+
+writeQA --> save
+queryContext --> assemble
+rebuildContext --> save
+deleteContext --> save
+
+save --> privateCtx
+save --> publicCtx
+save --> rawChat
+compress --> compressed
+aging --> longTermMemory
+relate --> longTermMemory
+memorize --> longTermMemory
+assemble --> privateCtx
+assemble --> publicCtx
+assemble --> compressed
+assemble --> longTermMemory
+template --> assemble
+
+privateCtx --> rag
+publicCtx --> rag
+rawChat --> compress
+compressed --> longTermBase
+longTermMemory --> longTermBase
+toolResult --> tool
+
+rag --> inference
+longTermBase --> inference
+tool --> inference
+@enduml
+图示说明：
+接口层：提供对上下文的外部操作入口（写入、查询、重建、删除）。
+
+上下文管理层：内部核心逻辑，负责上下文的保存、压缩、老化、关联、记忆、组装、结构化模板。
+
+上下文数据层：存储不同类型的数据（私有/公共、原始/压缩、长期记忆、工具结果）。
+
+基础组件层：底层支撑能力（RAG、长期记忆系统、工具、模型推理）。
+
+箭头表示数据流或调用关系，展示层与层之间的协作。
+
+
 ## 接口层
 
 ## 上下文管理层
