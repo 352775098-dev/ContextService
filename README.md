@@ -21,94 +21,63 @@
 
 
 # 上下文工程的逻辑架构
-@startuml
-!define RECTANGLE class
+以下是将原图内容转换为 Markdown 表格形式的“上下文工程”架构说明，适合在 Markdown 编辑器中直接使用：
 
-skinparam componentStyle rectangle
-left to right direction
+# 上下文工程架构
 
-package "上下文工程" {
+## 分层架构概览
 
-  rectangle "接口层" {
-    component "写入QA" as writeQA
-    component "查询上下文" as queryContext
-    component "重建上下文" as rebuildContext
-    component "删除上下文" as deleteContext
-  }
+| 层级 | 组件 |
+|------|------|
+| **接口层** | 写入QA · 查询上下文 · 重建上下文 · 删除上下文 |
+| **上下文管理层** | 保存 · 压缩 · 老化 · 关联 · 记忆 · 组装 · 结构化模板 |
+| **上下文数据层** | 私有上下文 · 公共上下文 · 原始对话 · 压缩内容 · 长期记忆 · 工具结果 |
+| **基础组件层** | RAG · 长期记忆 · 工具 · 模型推理 |
 
-  rectangle "上下文管理层" {
-    component "保存" as save
-    component "压缩" as compress
-    component "老化" as aging
-    component "关联" as relate
-    component "记忆" as memorize
-    component "组装" as assemble
-    component "结构化模板" as template
-  }
+---
 
-  rectangle "上下文数据层" {
-    component "私有上下文" as privateCtx
-    component "公共上下文" as publicCtx
-    component "原始对话" as rawChat
-    component "压缩内容" as compressed
-    component "长期记忆" as longTermMemory
-    component "工具结果" as toolResult
-  }
+## 详细说明
 
-  rectangle "基础组件层" {
-    component "RAG" as rag
-    component "长期记忆" as longTermBase
-    component "工具" as tool
-    component "模型推理" as inference
-  }
+### 📥 接口层
+对外提供的操作入口：
+- 写入QA
+- 查询上下文
+- 重建上下文
+- 删除上下文
 
-}
+### ⚙️ 上下文管理层
+核心处理逻辑：
+- 保存
+- 压缩
+- 老化
+- 关联
+- 记忆
+- 组装
+- 结构化模板
 
-writeQA --> save
-queryContext --> assemble
-rebuildContext --> save
-deleteContext --> save
+### 📦 上下文数据层
+存储的数据类型：
+- 私有上下文
+- 公共上下文
+- 原始对话
+- 压缩内容
+- 长期记忆
+- 工具结果
 
-save --> privateCtx
-save --> publicCtx
-save --> rawChat
-compress --> compressed
-aging --> longTermMemory
-relate --> longTermMemory
-memorize --> longTermMemory
-assemble --> privateCtx
-assemble --> publicCtx
-assemble --> compressed
-assemble --> longTermMemory
-template --> assemble
+### 🧩 基础组件层
+底层支撑能力：
+- RAG
+- 长期记忆
+- 工具
+- 模型推理
 
-privateCtx --> rag
-publicCtx --> rag
-rawChat --> compress
-compressed --> longTermBase
-longTermMemory --> longTermBase
-toolResult --> tool
+---
 
-rag --> inference
-longTermBase --> inference
-tool --> inference
-@enduml
-图示说明：
-接口层：提供对上下文的外部操作入口（写入、查询、重建、删除）。
+## 数据流示意（文本描述）
 
-上下文管理层：内部核心逻辑，负责上下文的保存、压缩、老化、关联、记忆、组装、结构化模板。
+1. 接口层接收请求 → 调用管理层对应功能
+2. 管理层处理数据 → 读写数据层
+3. 数据层依赖基础组件层实现具体能力
+4. 基础组件层提供推理、检索、工具调用等能力
 
-上下文数据层：存储不同类型的数据（私有/公共、原始/压缩、长期记忆、工具结果）。
-
-基础组件层：底层支撑能力（RAG、长期记忆系统、工具、模型推理）。
-
-箭头表示数据流或调用关系，展示层与层之间的协作。
-
-
-## 接口层
-
-## 上下文管理层
-
-## 上下文组装层
-
-## 上下文组装层
+您可以直接将此内容复制到任何 Markdown 编辑器中使用。如需添加更复杂的格式（如 Mermaid 图表），我也可以为您生成对应的代码。
