@@ -2,963 +2,1197 @@
 
 # 上下文工程架构设计文档
 
-**项目名称**: Context Engineering System (CES)  
-**版本**: v1.0  
-**状态**: 架构设计稿  
-**作者**: 架构师团队  
-**日期**: 2025-01-20
+## 文档信息
 
----
-
-## 文档概述
-
-本文档描述了一个面向大语言模型(LLM)应用的多轮对话管理系统——上下文工程系统(Context Engineering System, CES)的完整架构设计。该系统致力于解决以下核心挑战：
-
-- **上下文窗口限制**：LLM的上下文窗口有限，需要对历史对话进行智能压缩
-- **上下文持久化**：将对话历史保存到持久化存储，支持跨会话恢复
-- **上下文选择**：从海量历史中选择最相关的上下文片段
-- **工具编排**：管理对话中的工具调用链和状态
-- **长期记忆**：实现跨会话的信息保留和检索
+| 项目 | 内容 |
+|------|------|
+| 项目名称 | 上下文工程 (Context Engineering) |
+| 版本 | v1.0.0 |
+| 状态 | 架构设计稿 |
+| 作者 | 架构团队 |
 
 ---
 
 ## 一、用例视图
 
+用例视图从用户（Actor）视角描述系统的功能需求，展示系统在整个产品中的位置、主要功能以及与外部环境的交互关系。
+
 ### 1.1 系统上下文模型
 
+#### 1.1.1 领域边界定义
+
 ```mermaid
-flowchart TB
-    subgraph External_Environment["外部环境"]
-        User["用户"]
-        LLM["大语言模型"]
-        ExternalStorage["外部存储系统"]
-        ToolRegistry["工具注册中心"]
+graph TB
+    subgraph "外部环境"
+        User["用户/开发者"]
+        Agent["业务Agent"]
+        ExternalSystem["外部系统"]
     end
     
-    subgraph CES["上下文工程系统边界"]
-        ContextManager["上下文管理器"]
-        MemoryStore["记忆存储"]
-        CompressionEngine["压缩引擎"]
-        ToolOrchestrator["工具编排器"]
-        SessionManager["会话管理器"]
+    subgraph "上下文工程领域"
+        CE["上下文工程服务"]
+        KMM["长期记忆服务KMM"]
     end
     
-    User -->|用户输入| CES
-    CES -->|增强Prompt| LLM
-    LLM -->|LLM响应| CES
-    CES -->|持久化| ExternalStorage
-    CES -->|工具发现| ToolRegistry
-    ToolRegistry -->|工具执行| CES
+    subgraph "基础设施"
+        DB[(数据库)]
+        Cache[(缓存)]
+        MQ[(消息队列)]
+    end
+    
+    User -->|"交互请求"| Agent
+    Agent -->|"调用模型前获取上下文"| CE
+    Agent -->|"写入对话"| KMM
+    CE -->|"通知事件"| KMM
+    KMM -->|"读取/写入"| DB
+    CE -->|"缓存"| Cache
+    CE -->|"消息通知"| MQ
+    ExternalSystem -->|"外部接口"| CE
 ```
 
-**系统边界定义**：
+#### 1.1.2 外部接口定义
 
-| 组件 | 职责 | 外部接口 |
-|------|------|----------|
-| 上下文管理器 | 统一管理上下文生命周期 | ContextAPI |
-| 记忆存储 | 提供持久化和检索能力 | StorageAPI |
-| 压缩引擎 | 实现上下文压缩算法 | CompressionAPI |
-| 工具编排器 | 管理工具调用链 | ToolAPI |
-| 会话管理器 | 处理会话隔离和恢复 | SessionAPI |
+```mermaid
+classDiagram
+    class ContextService {
+        +WriteQA(ctx, req) Response
+        +QueryContext(ctx, req) Response
+        +RebuildContext(ctx, req) Response
+        +DeleteContext(ctx, req) Response
+    }
+    
+    class EventHandler {
+        +HandleNewConversation(event)
+        +HandleToolExecution(event)
+        +HandleMemoryUpdate(event)
+    }
+    
+    class ContextQuery {
+        +SearchRelevantHistory(query) []ContextSnippet
+        +GetSessionContext(sessionId) Context
+        +GetAgentContext(agentId) Context
+    }
+    
+    ContextService --> EventHandler
+    ContextService --> ContextQuery
+```
+
+**外部接口列表：**
+
+| 接口名称 | 方向 | 描述 | 参数 |
+|----------|------|------|------|
+| WriteQA | 入口 | 写入问答对到上下文 | sessionId, conversation, metadata |
+| QueryContext | 入口 | 查询相关上下文 | query, agentId, options |
+| RebuildContext | 入口 | 重建上下文窗口 | sessionId, strategy |
+| DeleteContext | 入口 | 删除上下文 | sessionId, contextIds |
+| HandleNewConversation | 事件 | 处理新对话事件 | conversationEvent |
+| HandleToolExecution | 事件 | 处理工具执行事件 | toolEvent |
+| HandleMemoryUpdate | 事件 | 处理记忆更新事件 | memoryEvent |
 
 ### 1.2 关键用例与交互模型
 
+#### 1.2.1 核心用例图
+
 ```mermaid
-useCase
-    actor User as "用户"
-    actor LLM as "LLM Agent"
+graph LR
+    subgraph "Actor"
+        Developer["开发者"]
+        BusinessAgent["业务Agent"]
+        Admin["运维管理员"]
+    end
     
-    uc1 as "发送消息"
-    uc2 as "压缩上下文"
-    uc3 as "保存对话"
-    uc4 as "检索记忆"
-    uc5 as "调用工具"
-    uc6 as "恢复会话"
+    subgraph "用例"
+        UC1["写入问答历史"]
+        UC2["查询上下文"]
+        UC3["压缩上下文"]
+        UC4["管理工具链"]
+        UC5["长期记忆检索"]
+        UC6["上下文模板组装"]
+        UC7["跨会话恢复"]
+        UC8["上下文监控"]
+    end
     
-    User --> uc1
-    uc1 --> uc2
-    uc2 --> uc3
-    uc1 --> uc4
-    uc4 --> uc2
-    uc1 --> uc5
-    uc5 --> User
-    uc6 --> uc1
+    Developer --> UC1
+    Developer --> UC2
+    BusinessAgent --> UC2
+    BusinessAgent --> UC3
+    BusinessAgent --> UC4
+    BusinessAgent --> UC5
+    BusinessAgent --> UC6
+    BusinessAgent --> UC7
+    Admin --> UC8
 ```
 
-**关键用例描述**：
+#### 1.2.2 关键场景交互模型
 
-#### UC1: 发送消息
-- **参与者**: 用户、LLM
-- **前置条件**: 会话已建立
-- **基本流**:
-  1. 用户输入消息
-  2. 系统检索相关记忆
-  3. 系统压缩上下文（必要时）
-  4. 构建增强Prompt发送给LLM
-  5. LLM返回响应
-  6. 系统保存对话到存储
-
-#### UC2: 压缩上下文
-- **参与者**: 压缩引擎
-- **前置条件**: 当前上下文超过阈值
-- **基本流**:
-  1. 计算当前token数量
-  2. 选择压缩策略（摘要/保留/混合）
-  3. 执行压缩算法
-  4. 验证压缩后上下文完整性
-
-#### UC3: 检索记忆
-- **参与者**: 记忆存储、用户
-- **前置条件**: 存在历史记忆
-- **基本流**:
-  1. 解析用户当前查询意图
-  2. 从记忆存储中检索相关片段
-  3. 按相关性排序
-  4. 返回Top-K结果
+**场景1：模型调用前获取上下文**
 
 ```mermaid
 sequenceDiagram
-    participant U as 用户
-    participant CM as 上下文管理器
-    participant CE as 压缩引擎
-    participant MS as 记忆存储
-    participant LLM as LLM
-    
-    U->>CM: 发送消息 "帮我总结..."
-    CM->>MS: 检索相关记忆
-    MS-->>CM: 返回记忆片段
-    CM->>CE: 检查token限制
-    CE-->>CE: 执行压缩策略
-    CE-->>CM: 返回压缩后上下文
-    CM->>LLM: 构建增强Prompt
-    LLM-->>CM: 返回响应
-    CM->>MS: 持久化对话
-    CM-->>U: 返回结果
+    participant Agent as 业务Agent
+    participant CE as 上下文工程服务
+    participant KMM as 长期记忆服务
+    participant DB as 数据库
+    participant Cache as 缓存
+
+    Agent->>CE: 请求获取上下文(QueryContext)
+    CE->>CE: 解析请求参数(agentId, sessionId, query)
+    CE->>KMM: 查询相关历史记忆(SearchRelevantHistory)
+    KMM-->>CE: 返回相关记忆片段
+    CE->>Cache: 查询当前会话上下文缓存
+    Cache-->>CE: 返回缓存的上下文
+    CE->>CE: 组装上下文(历史+记忆+工具输出)
+    CE->>CE: 应用压缩策略(如需)
+    CE-->>Agent: 返回完整上下文
+    Agent->>Agent: 填充到Prompt模板
+    Agent->>LLM: 调用模型
+```
+
+**场景2：新对话写入触发上下文管理**
+
+```mermaid
+sequenceDiagram
+    participant Agent as 业务Agent
+    participant KMM as 长期记忆服务
+    participant CE as 上下文工程服务
+    participant MQ as 消息队列
+
+    Agent->>KMM: 写入原始对话(SaveConversation)
+    KMM-->>Agent: 返回保存结果
+    KMM->>MQ: 发布新对话事件(NewConversationEvent)
+    MQ->>CE: 推送事件
+    CE->>CE: 解析事件获取agentId
+    CE->>KMM: 获取该Agent的任务流定义(GetTaskFlow)
+    KMM-->>CE: 返回任务流配置
+    CE->>KMM: 触发压缩流程(CompressContext)
+    KMM-->>CE: 返回压缩后的摘要
+    CE->>CE: 预准备所有模型调用的上下文
+    CE->>KMM: 召回相关记忆(RecallMemory)
+    KMM-->>CE: 返回相关记忆
+    CE->>CE: 更新上下文缓存(UpdateCache)
+    CE-->>Agent: 异步通知完成
+```
+
+**场景3：工具调用链管理**
+
+```mermaid
+sequenceDiagram
+    participant LLM as 大语言模型
+    participant Agent as 业务Agent
+    participant CE as 上下文工程服务
+    participant Tools as 工具集
+
+    LLM->>Agent: 输出工具调用请求
+    Agent->>CE: 注册工具调用上下文(RegisterToolChain)
+    CE->>CE: 保存工具调用状态
+    Agent->>Tools: 执行工具调用
+    Tools-->>Agent: 返回工具执行结果
+    Agent->>CE: 更新工具调用结果(UpdateToolResult)
+    CE->>CE: 整合工具输出到上下文
+    Agent->>LLM: 携带工具结果继续调用
 ```
 
 ---
 
 ## 二、逻辑视图
 
+逻辑视图从业务角度描述系统的组成元素、它们之间的关系以及采用的架构模式。
+
 ### 2.1 结构模型
+
+#### 2.1.1 系统架构分层
+
+```mermaid
+graph TB
+    subgraph "接口层"
+        API["API网关"]
+        GRPC["gRPC服务"]
+        Event["事件处理器"]
+    end
+    
+    subgraph "上下文管理层"
+        Writer["写入管理器"]
+        Compressor["压缩管理器"]
+        Assembler["组装管理器"]
+        Selector["选择管理器"]
+        Template["模板管理器"]
+    end
+    
+    subgraph "上下文数据层"
+        SessionCtx["会话上下文"]
+        AgentCtx["Agent上下文"]
+        ToolCtx["工具上下文"]
+        MemoryCtx["记忆上下文"]
+    end
+    
+    subgraph "基础组件层"
+        RAG["RAG检索引擎"]
+        LTM["长期记忆服务"]
+        ToolMgr["工具管理器"]
+        LLMInf["模型推理"]
+    end
+    
+    API --> Writer
+    GRPC --> Writer
+    Event --> Writer
+    
+    Writer --> Compressor
+    Compressor --> Assembler
+    Assembler --> Selector
+    Selector --> Template
+    
+    Writer --> SessionCtx
+    Compressor --> AgentCtx
+    Assembler --> ToolCtx
+    Selector --> MemoryCtx
+    
+    SessionCtx --> RAG
+    AgentCtx --> LTM
+    ToolCtx --> ToolMgr
+    MemoryCtx --> LLMInf
+```
+
+#### 2.1.2 核心组件设计
 
 ```mermaid
 classDiagram
     class ContextManager {
-        +current_session: Session
-        +compression_threshold: int
-        +add_message(role, content)
-        +get_prompt(): str
-        +compress_context()
-        +load_session(session_id)
+        +WriteQA(req) Response
+        +QueryContext(req) Response
+        +RebuildContext(req) Response
+        +DeleteContext(req) Response
+        -validateRequest(req) error
+        -routeToHandler(req) Handler
     }
     
-    class Session {
-        +session_id: str
-        +messages: List~Message~
-        +tools: List~ToolCall~
-        +metadata: SessionMetadata
-        +add_message(msg)
-        +get_token_count(): int
+    class CompressionManager {
+        +Compress(ctx, strategy) CompressedContext
+        -selectStrategy(type) CompressionStrategy
+        -executeCompression(data, strategy) Result
     }
     
-    class Message {
-        +role: str
-        +content: str
-        +tool_calls: List~ToolCall~
-        +timestamp: datetime
+    class AssemblyManager {
+        +Assemble(ctx, templates) AssembledPrompt
+        -mergeHistory(history) string
+        -mergeMemory(memory) string
+        -mergeTools(tools) string
     }
     
-    class CompressionEngine {
-        +strategy: CompressionStrategy
-        +compress(messages, limit): List~Message~
-        +summarize(message): str
-        +select_relevant(messages, query): List~Message~
+    class SelectionManager {
+        +Select(ctx, query, count) SelectedContext
+        -rankByRelevance(contexts, query) []Context
+        -deduplicate(contexts) []Context
     }
     
-    class MemoryStore {
-        +embeddings: EmbeddingStore
-        +long_term_memory: VectorStore
-        +save_memory(session_id, content)
-        +retrieve(query, top_k): List~Memory~
+    class MemoryRecallManager {
+        +Recall(query, agentId) []Memory
+        -searchByEmbedding(query) []Memory
+        -filterByTime(memory) []Memory
     }
     
-    class ToolOrchestrator {
-        +tool_registry: ToolRegistry
-        +execute_tool(name, params)
-        +plan_tool_chain(llm_output): List~ToolCall~
-    }
-    
-    ContextManager --> Session
-    Session --> Message
-    ContextManager --> CompressionEngine
-    ContextManager --> MemoryStore
-    ContextManager --> ToolOrchestrator
+    ContextManager --> CompressionManager
+    ContextManager --> AssemblyManager
+    ContextManager --> SelectionManager
+    AssemblyManager --> MemoryRecallManager
 ```
 
-**核心组件说明**：
+#### 2.1.3 架构模式选择
 
-| 组件 | 职责 | 关键方法 |
-|------|------|----------|
-| ContextManager | 上下文统一入口 | add_message(), get_prompt(), compress_context() |
-| Session | 会话状态容器 | add_message(), get_token_count() |
-| CompressionEngine | 上下文压缩 | compress(), summarize(), select_relevant() |
-| MemoryStore | 长期记忆存储 | save_memory(), retrieve() |
-| ToolOrchestrator | 工具编排 | execute_tool(), plan_tool_chain() |
+**采用分层架构 + 事件驱动架构**
+
+```mermaid
+graph LR
+    subgraph "分层架构"
+        L1["接口层"]
+        L2["管理层"]
+        L3["数据层"]
+        L4["基础层"]
+    end
+    
+    subgraph "事件驱动"
+        E1["事件发布"]
+        E2["事件订阅"]
+        E3["事件处理"]
+    end
+    
+    L1 -->|"事件"| E1
+    E1 --> E2
+    E2 --> E3
+    E3 --> L2
+```
 
 ### 2.2 行为模型
 
+#### 2.2.1 上下文写入流程
+
 ```mermaid
-stateDiagram-v2
-    [*] --> Idle: 系统初始化
-    
-    Idle --> Processing: 收到用户消息
-    Processing --> Compressing: 超过token阈值
-    Compressing --> Compressed: 压缩完成
-   Compressed --> SendingToLLM: 准备发送
-    SendingToLLM --> WaitingLLM: 请求发送
-    WaitingLLM --> ToolCalling: LLM返回工具调用
-    ToolCalling --> Executing: 执行工具
-    Executing --> SendingToLLM: 工具结果返回
-    WaitingLLM --> Storing: LLM返回最终响应
-    Storing --> Idle: 处理完成
-    
-    ToolCalling --> Error: 工具执行失败
-    Error --> SendingToLLM: 返回错误信息
+flowchart TD
+    A[接收WriteQA请求] --> B{验证请求参数}
+    B -->|失败| C[返回错误]
+    B -->|成功| D[解析会话ID和AgentID]
+    D --> E[构建上下文数据]
+    E --> F[选择压缩策略]
+    F --> G{策略类型?}
+    G -->|Summarization| H[调用LLM摘要]
+    G -->|Truncation| I[截断保留首尾]
+    G -->|Importance| J[按重要性筛选]
+    H --> K[更新会话上下文缓存]
+    I --> K
+    J --> K
+    K --> L[发布上下文更新事件]
+    L --> M[返回成功响应]
 ```
 
-**核心流程状态机**：
+#### 2.2.2 上下文查询流程
 
-| 状态 | 说明 | 转换条件 |
-|------|------|----------|
-| Idle | 空闲等待 | 收到消息→Processing |
-| Processing | 处理消息 | token超限→Compressing |
-| Compressing | 执行压缩 | 压缩完成→Compressed |
-| SendingToLLM | 发送LLM | 等待响应→WaitingLLM |
-| ToolCalling | 工具调用 | 需要工具→Executing |
-| Storing | 持久化 | 保存完成→Idle |
+```mermaid
+flowchart TD
+    A[接收QueryContext请求] --> B[解析查询参数]
+    B --> C[检查缓存]
+    C -->|命中| D[直接返回缓存]
+    C -->|未命中| E[执行检索]
+    E --> F[RAG检索历史对话]
+    F --> G[长期记忆检索]
+    G --> H[工具输出检索]
+    H --> I[相关性排序]
+    I --> J[去重处理]
+    J --> K[组装上下文片段]
+    K --> L[应用模板]
+    L --> M[返回完整上下文]
+    M --> N[写入缓存]
+```
 
 ### 2.3 数据模型
 
+#### 2.3.1 核心实体关系
+
 ```mermaid
 erDiagram
-    SESSION ||--o{ MESSAGE : contains
-    SESSION ||--o{ TOOL_CALL : has
-    SESSION }|--|| SESSION_METADATA : has
-    MESSAGE ||--o{ MESSAGE_CONTENT : has
+    Session ||--o{ Conversation : contains
+    Session ||--o{ ContextWindow : has
+    Agent ||--o{ TaskFlow : defines
+    TaskFlow ||--o{ ModelCall : includes
+    ContextWindow ||--o{ ContextSnippet : contains
+    ContextSnippet ||--o{ HistoryPiece : or
+    ContextSnippet ||--o{ MemoryPiece : or
+    ContextSnippet ||--o{ ToolOutput : or
     
-    SESSION {
-        string session_id PK
+    Session {
+        string id PK
+        string agent_id FK
         string user_id
         datetime created_at
         datetime updated_at
         string status
     }
     
-    MESSAGE {
-        string message_id PK
+    ContextWindow {
+        string id PK
         string session_id FK
-        string role
-        text content
-        json tool_calls
-        datetime timestamp
-    }
-    
-    SESSION_METADATA {
-        string session_id PK
-        int token_count
+        string agent_id FK
+        int max_tokens
         string compression_strategy
-        json context_summary
+        json current_context
+        json compressed_summary
     }
     
-    LONG_TERM_MEMORY {
-        string memory_id PK
-        string user_id FK
-        text content
-        vector embedding
+    ContextSnippet {
+        string id PK
+        string window_id FK
+        string type "history|memory|tool"
+        string content
+        int token_count
+        float relevance_score
         datetime created_at
-        string memory_type
     }
     
-    TOOL {
-        string tool_id PK
+    Agent {
+        string id PK
         string name
         string description
-        json schema
-        string category
+        json config
+        string llm_provider
+    }
+    
+    TaskFlow {
+        string id PK
+        string agent_id FK
+        string name
+        json steps
+        int order
+    }
+    
+    ModelCall {
+        string id PK
+        string task_flow_id FK
+        string model_name
+        string prompt_template
+        int order
     }
 ```
 
-**数据模型详细说明**：
+#### 2.3.2 数据流设计
 
-#### 会话(Session)
-```python
-class Session:
-    session_id: str              # 唯一标识符
-    user_id: str                 # 用户ID
-    messages: List[Message]      # 消息列表
-    created_at: datetime         # 创建时间
-    updated_at: datetime         # 更新时间
-    metadata: SessionMetadata    # 元数据
-    status: SessionStatus        # 会话状态
+```mermaid
+flowchart LR
+    subgraph "数据生产"
+        U[用户输入] --> A[Agent]
+        A --> L[LLM调用]
+    end
+    
+    subgraph "数据处理"
+        L -->|原始对话| KM[长期记忆服务KMM]
+        KM -->|写入事件| CE[上下文工程服务]
+        CE -->|压缩处理| CC[压缩引擎]
+        CC -->|选择处理| CS[选择器]
+    end
+    
+    subgraph "数据消费"
+        CS -->|上下文片段| CP[上下文池]
+        CP -->|组装| AT[模板组装]
+        AT -->|填充| P[Prompt]
+        P --> L2[LLM调用]
+    end
+    
+    KM -.->|异步通知| CE
 ```
 
-#### 消息(Message)
-```python
-class Message:
-    message_id: str              # 消息ID
-    role: Role                   # 角色: user/assistant/system
-    content: str                 # 消息内容
-    tool_calls: Optional[List[ToolCall]]  # 工具调用
-    token_count: int             # token数
-    timestamp: datetime          # 时间戳
-```
+#### 2.3.3 数据所有权与隔离
 
-#### 长期记忆(LongTermMemory)
-```python
-class LongTermMemory:
-    memory_id: str               # 记忆ID
-    user_id: str                 # 用户ID
-    content: str                 # 记忆内容
-    embedding: List[float]       # 向量嵌入
-    memory_type: MemoryType      # 记忆类型: fact/preference/context
-    importance: float            # 重要性分数
-    created_at: datetime         # 创建时间
-    accessed_at: datetime        # 最后访问时间
+```mermaid
+classDiagram
+    class ContextData {
+        <<abstract>>
+        #id: string
+        #ownerId: string
+        #createdAt: time
+        #updatedAt: time
+        +GetOwnerId() string
+        +ValidateOwnership(requesterId) bool
+    }
+    
+    class PrivateContext {
+        -userId: string
+        -sessionId: string
+        -content: string
+    }
+    
+    class PublicContext {
+        -agentId: string
+        -sharedGroupIds: []string
+        -content: string
+    }
+    
+    class ToolOutputContext {
+        -toolCallId: string
+        -sessionId: string
+        -result: string
+    }
+    
+    ContextData <|-- PrivateContext
+    ContextData <|-- PublicContext
+    ContextData <|-- ToolOutputContext
 ```
 
 ### 2.4 技术模型
 
+#### 2.4.1 技术栈选型
+
 ```mermaid
-flowchart LR
-    subgraph Application_Layer["应用层"]
-        CES["Context Engineering System"]
-        API["REST/gRPC API"]
+graph TB
+    subgraph "运行时"
+        GO["Go 1.21+"]
+        GIN["Gin Web框架"]
+        GRPC["gRPC框架"]
     end
     
-    subgraph Core_Logic["核心逻辑层"]
-        CM["Context Manager"]
-        CE["Compression Engine"]
-        MS["Memory Store"]
-        TO["Tool Orchestrator"]
+    subgraph "存储"
+        REDIS["Redis 7.x 缓存"]
+        POSTGRES["PostgreSQL 15 持久化"]
+        ES["Elasticsearch 8.x 检索"]
     end
     
-    subgraph Infrastructure["基础设施层"]
-        Redis["Redis: 缓存/会话"]
-        PG["PostgreSQL: 持久化"]
-        ES["Elasticsearch: 搜索"]
-        VS["Vector Store: 向量存储"]
+    subgraph "消息"
+        KAFKA["Kafka 3.x 消息队列"]
     end
     
-    subgraph External["外部依赖"]
-        LLM["LLM Provider\n(OpenAI/Anthropic)"]
-        Embed["Embedding Service"]
+    subgraph "AI/ML"
+        OPENAI["OpenAI API"]
+        EMBEDDING["Embedding服务"]
     end
     
-    API --> CES
-    CES --> CM
-    CES --> CE
-    CES --> MS
-    CES --> TO
+    subgraph "基础设施"
+        K8S["Kubernetes"]
+        DOCKER["Docker"]
+        PROMETHEUS["Prometheus监控"]
+    end
     
-    CM --> Redis
-    CM --> PG
-    MS --> ES
-    MS --> VS
-    
-    CE --> LLM
-    TO --> LLM
-    MS --> Embed
+    GO --> GIN
+    GO --> GRPC
+    GIN --> REDIS
+    GIN --> POSTGRES
+    GIN --> ES
+    GRPC --> KAFKA
+    GO --> OPENAI
+    GO --> EMBEDDING
+    GO --> DOCKER
+    DOCKER --> K8S
+    K8S --> PROMETHEUS
 ```
 
-**技术栈选型**：
+#### 2.4.2 开源组件依赖
 
-| 层级 | 技术组件 | 选型理由 |
-|------|----------|----------|
-| 应用层 | FastAPI/Gradio | 高性能API服务 |
-| 核心逻辑 | Python 3.10+ | 丰富AI生态 |
-| 会话缓存 | Redis | 高性能内存存储 |
-| 持久化 | PostgreSQL | 可靠关系型存储 |
-| 向量存储 | Milvus/QDrant | 高效向量检索 |
-| 搜索 | Elasticsearch | 全文搜索能力 |
-| LLM | OpenAI/Anthropic | 主流LLM支持 |
+| 组件类别 | 开源项目 | 版本 | 用途 |
+|----------|----------|------|------|
+| Web框架 | gin-gonic/gin | v1.9.x | HTTP API服务 |
+| gRPC | grpc/grpc-go | v1.58.x | RPC通信 |
+| ORM | gorm.io/gorm | v1.25.x | 数据库操作 |
+| 缓存 | go-redis/redis | v9.x | Redis客户端 |
+| 消息 | segmentio/kafka-go | v0.4.x | Kafka生产者/消费者 |
+| 日志 | logrus | v1.9.x | 结构化日志 |
+| 配置 | spf13/viper | v1.18.x | 配置管理 |
+| 验证 | go-playground/validator | v10.x | 请求验证 |
+| 监控 | prometheus/client_golang | v1.17.x | 指标采集 |
 
 ---
 
 ## 三、开发视图
 
+开发视图从实现角度描述代码组织、构建管理和硬件依赖。
+
 ### 3.1 代码模型
+
+#### 3.1.1 代码仓库结构
 
 ```mermaid
 graph TD
     root["context-engineering/"]
-    root --> src["src/"]
-    src --> core["core/"]
-    core --> __init__["__init__.py"]
-    core --> context_manager["context_manager.py"]
-    core --> session["session.py"]
-    core --> message["message.py"]
+    root --> api["api/"]
+    api --> grpc["grpc/"]
+    api --> rest["rest/"]
     
-    src --> compression["compression/"]
-    compression --> __init__["__init__.py"]
-    compression --> engine["engine.py"]
-    compression --> strategies["strategies/"]
-    strategies --> base["base.py"]
-    strategies --> summarize["summarize.py"]
-    strategies --> selective["selective.py"]
-    strategies --> hierarchical["hierarchical.py"]
+    root --> internal["internal/"]
+    internal --> config["config/"]
+    internal --> handler["handler/"]
+    handler --> context["context/"]
+    handler --> event["event/"]
+    internal --> manager["manager/"]
+    manager --> writer["writer/"]
+    manager --> compressor["compressor/"]
+    manager --> assembler["assembler/"]
+    manager --> selector["selector/"]
+    internal --> service["service/"]
+    service --> contextsvc["context/"]
+    service --> memorysvc["memory/"]
+    internal --> repository["repository/"]
+    repository --> cache["cache/"]
+    repository --> db["db/"]
+    internal --> model["model/"]
+    internal --> middleware["middleware/"]
     
-    src --> memory["memory/"]
-    memory --> __init__["__init__.py"]
-    memory --> store["store.py"]
-    memory --> embedding["embedding.py"]
-    memory --> retriever["retriever.py"]
+    root --> pkg["pkg/"]
+    pkg --> utils["utils/"]
+    pkg --> types["types/"]
     
-    src --> tools["tools/"]
-    tools --> __init__["__init__.py"]
-    tools --> orchestrator["orchestrator.py"]
-    tools --> registry["registry.py"]
+    root --> scripts["scripts"]
+    root --> docs["docs/"]
+    root --> test["test/"]
     
-    src --> api["api/"]
-    api --> __init__["__init__.py"]
-    api --> routes["routes.py"]
-    api --> schemas["schemas.py"]
-    
-    src --> config["config.py"]
-    
-    tests["tests/"]
-    tests --> test_context["test_context_manager.py"]
-    tests --> test_compression["test_compression.py"]
-    tests --> test_memory["test_memory.py"]
-    tests --> test_tools["test_tools.py"]
-    
-    root --> pyproject["pyproject.toml"]
-    root --> requirements["requirements.txt"]
-    root --> docker["Dockerfile"]
+    style root fill:#f9f,stroke:#333
+    style api fill:#bbf,stroke:#333
+    style internal fill:#bfb,stroke:#333
 ```
 
-**核心模块说明**：
+#### 3.1.2 核心代码模块映射
 
-```
-src/
-├── core/                    # 核心领域模型
-│   ├── context_manager.py  # 上下文管理器
-│   ├── session.py          # 会话管理
-│   └── message.py          # 消息模型
-├── compression/            # 压缩引擎
-│   ├── engine.py           # 压缩主引擎
-│   └── strategies/         # 压缩策略
-│       ├── summarize.py    # 摘要策略
-│       ├── selective.py    # 选择策略
-│       └── hierarchical.py # 分层策略
-├── memory/                 # 记忆存储
-│   ├── store.py            # 存储接口
-│   ├── embedding.py        # 向量化
-│   └── retriever.py        # 检索器
-├── tools/                  # 工具编排
-│   ├── orchestrator.py     # 编排器
-│   └── registry.py         # 注册中心
-├── api/                    # API层
-│   ├── routes.py           # 路由定义
-│   └── schemas.py          # 数据模型
-└── config.py               # 配置管理
+| 系统元素 | 代码模块 | 路径 |
+|----------|----------|------|
+| 上下文写入 | WriteManager | internal/manager/writer/ |
+| 上下文压缩 | CompressionManager | internal/manager/compressor/ |
+| 上下文组装 | AssemblyManager | internal/manager/assembler/ |
+| 上下文选择 | SelectionManager | internal/manager/selector/ |
+| gRPC服务 | ContextService | api/grpc/ |
+| REST API | ContextHandler | api/rest/ |
+| 事件处理 | EventHandler | internal/handler/event/ |
+| 缓存操作 | CacheRepository | internal/repository/cache/ |
+| 数据库操作 | DBRepository | internal/repository/db/ |
+| 数据模型 | DomainModels | internal/model/ |
+
+#### 3.1.3 核心代码结构
+
+```mermaid
+classDiagram
+    class ContextServiceImpl {
+        -manager *ManagerFactory
+        -logger *logrus.Logger
+        +WriteQA(context.Context, *WriteQARequest) (*WriteQAResponse, error)
+        +QueryContext(context.Context, *QueryContextRequest) (*QueryContextResponse, error)
+        +RebuildContext(context.Context, *RebuildRequest) (*RebuildResponse, error)
+        +DeleteContext(context.Context, *DeleteRequest) (*DeleteResponse, error)
+    }
+    
+    class ManagerFactory {
+        -writerMgr *WriterManager
+        -compressorMgr *CompressionManager
+        -assemblerMgr *AssemblyManager
+        -selectorMgr *SelectionManager
+        +GetWriterManager() *WriterManager
+        +GetCompressorManager() *CompressionManager
+        +GetAssemblerManager() *AssemblyManager
+        +GetSelectorManager() *SelectionManager
+    }
+    
+    class WriterManager {
+        -repo *Repository
+        -cache *CacheRepo
+        -eventPublisher *EventPublisher
+        +WriteQA(ctx context.Context, req *WriteQARequest) error
+        -persistToStorage(ctx context.Context, data *ContextData) error
+        -publishEvent(ctx context.Context, event *ContextEvent) error
+    }
+    
+    class CompressionManager {
+        -strategies map[string]CompressionStrategy
+        -llmClient LLMClient
+        +Compress(ctx context.Context, data *ContextData, strategy string) (*CompressedData, error)
+        -registerStrategy(name string, strategy CompressionStrategy)
+    }
+    
+    class CompressionStrategy {
+        <<interface>>
+        +Compress(ctx context.Context, data *ContextData) (*CompressedData, error)
+    }
+    
+    class SummarizationStrategy {
+        -llmClient LLMClient
+        +Compress(ctx context.Context, data *ContextData) (*CompressedData, error)
+    }
+    
+    class TruncationStrategy {
+        -keepHead int
+        -keepTail int
+        +Compress(ctx context.Context, data *ContextData) (*CompressedData, error)
+    }
+    
+    class ImportanceStrategy {
+        -scorer RelevanceScorer
+        +Compress(ctx context.Context, data *ContextData) (*CompressedData, error)
+    }
+    
+    ContextServiceImpl --> ManagerFactory
+    ManagerFactory --> WriterManager
+    ManagerFactory --> CompressionManager
+    CompressionStrategy <|.. SummarizationStrategy
+    CompressionStrategy <|.. TruncationStrategy
+    CompressionStrategy <|.. ImportanceStrategy
 ```
 
 ### 3.2 构建模型
 
+#### 3.2.1 构建依赖关系
+
 ```mermaid
-flowchart LR
-    subgraph Build["构建阶段"]
-        style Build fill:#e1f5fe
-        Lint["代码检查\npylint/ruff"]
-        Type["类型检查\nmypy"]
-        Test["单元测试\npytest"]
-        BuildPkg["打包\npoetry/pip"]
+graph LR
+    subgraph "依赖层"
+        GO["Go 1.21"]
+        SYS["系统库"]
     end
     
-    subgraph Artifact["产物"]
-        style Artifact fill:#e8f5e8
-        Wheel[".whl 包"]
-        Docker["Docker Image"]
-        Docs["文档\nsphinx"]
+    subgraph "第三方依赖"
+        GIN["gin"]
+        GRPC["grpc"]
+        GORM["gorm"]
+        REDIS["go-redis"]
+        KAFKA["kafka-go"]
     end
     
-    subgraph Deploy["部署阶段"]
-        style Deploy fill:#fff3e0
-        Registry["镜像仓库"]
-        K8s["Kubernetes"]
+    subgraph "内部依赖"
+        PKG["pkg/"]
+        API["api/"]
+        INTL["internal/"]
     end
     
-    Lint --> Type
-    Type --> Test
-    Test --> BuildPkg
-    BuildPkg --> Wheel
-    BuildPkg --> Docker
-    Docker --> Registry
-    Registry --> K8s
+    subgraph "主程序"
+        MAIN["main.go"]
+    end
+    
+    GO --> PKG
+    GO --> API
+    GO --> INTL
+    SYS --> MAIN
+    
+    GIN --> API
+    GRPC --> API
+    GORM --> INTL
+    REDIS --> INTL
+    KAFKA --> INTL
+    
+    PKG --> MAIN
+    API --> MAIN
+    INTL --> MAIN
 ```
 
-**构建配置** (pyproject.toml):
+#### 3.2.2 构建工具链
 
-```toml
-[project]
-name = "context-engineering"
-version = "1.0.0"
-description = "Multi-turn conversation management system"
-requires-python = ">=3.10"
+```mermaid
+flowchart TD
+    A[代码编写] --> B[单元测试]
+    B --> C[代码检查]
+    C --> D[Lint]
+    D --> E[代码格式化]
+    E --> F[编译构建]
+    F --> G[集成测试]
+    G --> H[镜像构建]
+    H --> I[镜像推送]
+    I --> J[部署]
+    
+    style A fill:#f9f
+    style B fill:#bbf
+    style C fill:#bfb
+    style D fill:#ff9
+    style E fill:#ff9
+    style F fill:#f66
+    style G fill:#bbf
+    style H fill:#f66
+    style I fill:#f66
+    style J fill:#9f9
+```
 
-dependencies = [
-    "fastapi>=0.104.0",
-    "redis>=5.0.0",
-    "sqlalchemy>=2.0.0",
-    "pymilvus>=2.3.0",
-    "openai>=1.3.0",
-    "tiktoken>=0.5.0",
-    "pydantic>=2.0.0",
-]
+**构建命令：**
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=7.4.0",
-    "pytest-cov>=4.1.0",
-    "ruff>=0.1.0",
-    "mypy>=1.7.0",
-]
+```bash
+# 本地开发
+make dev
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
+# 运行测试
+make test
 
-[tool.ruff]
-line-length = 100
-target-version = "py310"
+# 代码检查
+make lint
+
+# 构建二进制
+make build
+
+# 构建镜像
+make docker-build
+
+# 推送镜像
+make docker-push
 ```
 
 ### 3.3 硬件模型
 
-```mermaid
-flowchart TB
-    subgraph Hardware["硬件规格"]
-        subgraph API_Server["API Server"]
-            CPU_API["CPU: 4核"]
-            MEM_API["Memory: 8GB"]
-            DISK_API["Disk: 100GB SSD"]
-        end
-        
-        subgraph Cache_Cluster["Redis Cluster"]
-            CPU_Redis["CPU: 2核"]
-            MEM_Redis["Memory: 16GB"]
-        end
-        
-        subgraph DB_Cluster["Database Cluster"]
-            CPU_DB["CPU: 4核"]
-            MEM_DB["Memory: 16GB"]
-            DISK_DB["Disk: 500GB SSD"]
-        end
-        
-        subgraph Vector_Cluster["Vector Store"]
-            CPU_Vector["CPU: 8核"]
-            MEM_Vector["Memory: 32GB"]
-            GPU_Vector["GPU: 1x NVIDIA T4"]
-        end
-    end
-```
+#### 3.3.1 运行时资源要求
 
-**硬件规格要求**：
-
-| 组件 | CPU | 内存 | 存储 | GPU |
-|------|-----|------|------|-----|
-| API Server | 4核 | 8GB | 100GB SSD | - |
-| Redis Cache | 2核 | 16GB | - | - |
-| PostgreSQL |4核 | 16GB | 500GB SSD | - |
-| Vector Store | 8核 | 32GB | 200GB SSD | NVIDIA T4 |
+| 规格 | CPU | 内存 | 磁盘 | 说明 |
+|------|-----|------|------|------|
+| 开发环境 | 2核 | 4GB | 20GB | 本地运行 |
+| 测试环境 | 4核 | 8GB | 50GB | 集成测试 |
+| 生产环境(小) | 8核 | 16GB | 100GB | 单实例 |
+| 生产环境(中) | 16核 | 32GB | 200GB | 3实例集群 |
+| 生产环境(大) | 32核 | 64GB | 500GB | 5实例集群 |
 
 ---
 
 ## 四、运行视图
 
+运行视图从运维角度描述系统运行时的行为、进程交互和运维能力。
+
 ### 4.1 运行模型
+
+#### 4.1.1 进程与线程设计
+
+```mermaid
+graph TB
+    subgraph "上下文工程服务进程"
+        subgraph "主线程"
+            Main["main goroutine"]
+        end
+        
+        subgraph "工作线程池"
+            WP1["Worker Pool 1: API处理"]
+            WP2["Worker Pool 2: 压缩处理"]
+            WP3["Worker Pool 3: 事件消费"]
+        end
+        
+        subgraph "后台goroutine"
+            AG1["定时任务: 缓存清理"]
+            AG2["定时任务: 指标上报"]
+            AG3["定时任务: 状态检查"]
+        end
+        
+        Main --> WP1
+        Main --> WP2
+        Main --> WP3
+        Main --> AG1
+        Main --> AG2
+        Main --> AG3
+    end
+    
+    subgraph "外部依赖进程"
+        Redis["Redis Cluster"]
+        Kafka["Kafka Cluster"]
+        DB["PostgreSQL"]
+    end
+    
+    WP1 --> Redis
+    WP2 --> Redis
+    WP3 --> Kafka
+    WP1 --> DB
+    WP2 --> DB
+```
+
+#### 4.1.2 并发与高可用设计
+
+```mermaid
+graph LR
+    subgraph "高可用架构"
+        LB["负载均衡"]
+        
+        subgraph "服务集群"
+            CE1["CE实例1"]
+            CE2["CE实例2"]
+            CE3["CE实例3"]
+        end
+        
+        subgraph "数据层"
+            RedisCluster["Redis Cluster"]
+            PGCluster["PostgreSQL集群"]
+            KafkaCluster["Kafka集群"]
+        end
+        
+        LB --> CE1
+        LB --> CE2
+        LB --> CE3
+        
+        CE1 --> RedisCluster
+        CE2 --> RedisCluster
+        CE3 --> RedisCluster
+        
+        CE1 --> PGCluster
+        CE2 --> PGCluster
+        CE3 --> PGCluster
+        
+        CE1 --> KafkaCluster
+        CE2 --> KafkaCluster
+        CE3 --> KafkaCluster
+    end
+    
+    style LB fill:#f66
+    style CE1 fill:#6f6
+    style CE2 fill:#6f6
+    style CE3 fill:#6f6
+```
+
+#### 4.1.3 弹性伸缩设计
+
+```mermaid
+flowchart TD
+    A[监控指标] --> B{CPU > 70%?}
+    B -->|是| C[触发扩容]
+    B -->|否| D{CPU < 30%?}
+    D -->|是| E[触发缩容]
+    D -->|否| F[保持当前]
+    
+    C --> G[增加Pod]
+    E --> H[减少Pod]
+    F --> A
+    
+    G --> I[等待新Pod就绪]
+    I --> A
+    H --> A
+    
+    style C fill:#f66
+    style E fill:#66f
+```
+
+#### 4.1.4 关键运行场景序列图
 
 ```mermaid
 sequenceDiagram
     participant Client as 客户端
-    participant API as API服务
-    participant Redis as Redis缓存
-    participant PG as PostgreSQL
-    participant Vector as 向量存储
-    participant LLM as LLM服务
+    participant LB as 负载均衡
+    participant CE1 as CE实例1
+    participant CE2 as CE实例2
+    participant Redis as Redis
+    participant DB as 数据库
+
+    Client->>LB: QueryContext请求
+    LB->>CE1: 转发请求
+    CE1->>Redis: 检查缓存
+    Redis-->>CE1: 缓存未命中
+    CE1->>DB: 检索历史数据
+    DB-->>CE1: 返回数据
+    CE1->>CE1: 执行压缩和组装
+    CE1-->>Client: 返回上下文
     
-    Client->>API: POST /chat
-    
-    rect rgb(240, 248, 255)
-        Note over API,Redis: 会话加载
-        API->>Redis: 查询会话缓存
-        alt 缓存命中
-            Redis-->>API: 返回会话数据
-        else 缓存未命中
-            API->>PG: 查询会话记录
-            PG-->>API: 返回会话
-            API->>Vector: 检索相关记忆
-            Vector-->>API: 返回记忆片段
-            API->>Redis: 缓存会话
-        end
-    end
-    
-    rect rgb(255, 248, 240)
-        Note over API,LLM: 上下文处理
-        API->>API: 检查token限制
-        alt 需要压缩
-            API->>LLM: 请求摘要
-            LLM-->>API: 返回摘要
-        end
-        API->>API: 构建增强Prompt
-        API->>LLM: 发送请求
-    end
-    
-    rect rgb(240, 255, 248)
-        Note over API,LLM: 工具调用(可选)
-        alt LLM返回工具调用
-            API->>API: 解析工具调用
-            API->>API: 执行工具链
-            API->>LLM: 返回工具结果
-            LLM-->>API: 最终响应
-        end
-    end
-    
-    rect rgb(248, 255, 240)
-        Note over API,PG: 结果持久化
-        API->>PG: 保存消息
-        API->>Vector: 保存记忆(可选)
-        API->>Redis: 更新缓存
-    end
-    
-    API-->>Client: 返回响应
+    Note over Client,CE2: 并发场景
+    Client->>LB: 写入请求
+    LB->>CE2: 转发请求
+    CE2->>Redis: 写入缓存
+    CE2->>DB: 持久化
+    CE2->>Redis: 发布缓存失效事件
+    Redis-->>CE1: 通知缓存失效
+    CE1->>Redis: 清除本地缓存
+    CE2-->>Client: 返回成功
 ```
-
-**并发与高可用设计**：
-
-| 特性 | 实现方案 | 说明 |
-|------|----------|------|
-| 会话隔离 | Redis Session | 每个会话独立Key |
-| 并发控制 | 乐观锁 | 消息追加使用版本号 |
-| 高可用 | 主从复制 | Redis/PG主从部署 |
-| 弹性伸缩 | K8s HPA | 根据CPU/内存自动扩缩 |
-| 熔断 | CircuitBreaker | 工具调用失败熔断 |
 
 ### 4.2 运维模型
 
+#### 4.2.1 运维系统设计
+
 ```mermaid
-flowchart TB
-    subgraph Monitoring["监控系统"]
-        Prometheus["Prometheus"]
-        Grafana["Grafana"]
-        Alert["AlertManager"]
+graph TB
+    subgraph "监控体系"
+        METRICS["指标采集\nPrometheus"]
+        LOGS["日志收集\nLoki"]
+        TRACE["链路追踪\nJaeger"]
+        ALERT["告警通知\nAlertManager"]
     end
     
-    subgraph Logging["日志系统"]
-        ELK["ELK Stack"]
-        Loki["Loki"]
+    subgraph "运维功能"
+        HEALTH["健康检查"]
+        METRIC["指标查询"]
+        LOG["日志查询"]
+        TRACEV["链路查看"]
     end
     
-    subgraph Tracing["追踪系统"]
-        Jaeger["Jaeger"]
+    subgraph "自动化运维"
+        AUTOSCALE["自动伸缩"]
+        ROLLBACK["自动回滚"]
+        DEPLOY["部署管理"]
     end
     
-    subgraph CES_System["CES系统"]
-        API["API Server"]
-        Worker["Background Worker"]
-    end
+    METRICS --> ALERT
+    LOGS --> ALERT
+    METRICS --> METRIC
+    LOGS --> LOG
+    TRACE --> TRACEV
     
-    API --> Prometheus
-    Worker --> Prometheus
-    Prometheus --> Grafana
-    Grafana --> Alert
-    
-    API --> ELK
-    Worker --> ELK
-    
-    API --> Jaeger
-    Worker --> Jaeger
+    HEALTH --> AUTOSCALE
+    METRICS --> AUTOSCALE
+    AUTOSCALE --> DEPLOY
+    HEALTH --> ROLLBACK
+    METRICS --> ROLLBACK
 ```
 
-**关键运维指标**：
+#### 4.2.2 核心运维指标
 
-| 指标 | 告警阈值 | 说明 |
-|------|----------|------|
-| API响应时间P99 | >2s | API延迟告警 |
-| Token使用率 | >90% | 上下文即将满载 |
-| 压缩失败率 | >5% | 压缩引擎异常 |
-| LLM调用失败率 | >10% | LLM服务异常 |
-| 内存使用率 | >80% | 内存资源告警 |
+| 指标名称 | 类型 | 阈值 | 说明 |
+|----------|------|------|------|
+| request_latency_p99 | 延迟 | <500ms | 请求P99延迟 |
+| request_success_rate | 可用性 | >99.9% | 请求成功率 |
+| context_compression_time | 延迟 | <200ms | 上下文压缩耗时 |
+| cache_hit_rate | 缓存 | >80% | 缓存命中率 |
+| memory_usage_percent | 资源 | <85% | 内存使用率 |
+| cpu_usage_percent | 资源 | <70% | CPU使用率 |
+| kafka_consumer_lag | 队列 | <1000 | 消息消费延迟 |
 
 ---
 
 ## 五、部署视图
 
+部署视图面向交付，描述软件包格式、部署节点和拓扑结构。
+
 ### 5.1 交付模型
 
+#### 5.1.1 软件包定义
+
 ```mermaid
-flowchart LR
-    subgraph Source["源码"]
-        Git["Git Repository"]
+graph TD
+    subgraph "交付物"
+        BIN["二进制文件\ncontext-engineering"]
+        CONFIG["配置文件\nconfig.yaml"]
+        DOCKER["Docker镜像\ncontext-engineering:v1.0.0"]
+        HELM["Helm Chart\ncontext-engineering-1.0.0.tgz"]
     end
     
-    subgraph Build["构建"]
-        CI["CI/CD Pipeline"]
-        Test["自动化测试"]
+    subgraph "镜像内容"
+        BASE["基础镜像\ngolang:1.21-alpine"]
+        CERT["证书"]
+        DEP["运行时依赖"]
+        APP["应用程序"]
     end
     
-    subgraph Package["交付物"]
-        DockerImg["Docker Image\ncontext-engineering:v1.0.0"]
-        Helm["Helm Chart\nces-1.0.0.tgz"]
+    subgraph "镜像标签"
+        TAG_VER["版本标签\nv1.0.0"]
+        TAG_LATEST["最新标签\nlatest"]
+        TAG_COMMIT["提交标签\nabc1234"]
     end
     
-    subgraph Registry["仓库"]
-        Harbor["Harbor/ACR"]
-    end
+    BASE --> CERT
+    CERT --> DEP
+    DEP --> APP
+    APP --> DOCKER
     
-    Git --> CI
-    CI --> Test
-    Test --> DockerImg
-    DockerImg --> Helm
-    Helm --> Harbor
+    DOCKER --> TAG_VER
+    DOCKER --> TAG_LATEST
+    DOCKER --> TAG_COMMIT
 ```
 
-**交付物定义**：
+#### 5.1.2 版本命名规范
 
-| 交付物 | 格式 | 命名规范 | 位置 |
-|--------|------|----------|------|
-| Docker镜像 | OCI | ces-{version} | registry.example.com/ces |
-| Helm Chart | TGZ | ces-{version}.tgz | chartrepo.example.com |
-| API文档 | OpenAPI JSON | openapi.json | 内嵌 |
+| 类型 | 格式 | 示例 |
+|------|------|------|
+| 版本号 | v主版本.次版本.修订 | v1.0.0 |
+| 镜像标签 | {version}-{commit} | v1.0.0-abc1234 |
+| Helm版本 | {chart}-{version} | context-engineering-1.0.0 |
 
 ### 5.2 部署模型
 
+#### 5.2.1 部署拓扑
+
 ```mermaid
-flowchart TB
-    subgraph K8s_Cluster["Kubernetes Cluster"]
-        subgraph Ingress["Ingress Layer"]
-            NGINX["Nginx Ingress"]
+graph TB
+    subgraph "云基础设施"
+        VPC["VPC"]
+        
+        subgraph "Kubernetes集群"
+            subgraph "命名空间: context-engineing"
+                Deploy["Deployment\n3副本"]
+                Svc["Service\nClusterIP"]
+                HPA["HPA\n自动伸缩"]
+                ConfigMap["ConfigMap\n配置"]
+                Secret["Secret\n密钥"]
+            end
+            
+            subgraph "Ingress"
+                Ingress["Ingress\nTLS终止"]
+            end
         end
         
-        subgraph API_Tier["API Tier"]
-            API_Pod1["API Pod"]
-            API_Pod2["API Pod"]
-            API_Pod3["API Pod"]
-        end
-        
-        subgraph Worker_Tier["Worker Tier"]
-            Worker_Pod1["Worker Pod"]
-            Worker_Pod2["Worker Pod"]
-        end
-        
-        subgraph Data_Tier["Data Tier"]
-            Redis_SVC["Redis SVC"]
-            PG_SVC["PostgreSQL SVC"]
-            Milvus_SVC["Milvus SVC"]
-        end
-        
-        subgraph Storage["持久存储"]
-            PVC["PVC"]
+        subgraph "外部服务"
+            RedisExt["Redis Cluster"]
+            PGExt["PostgreSQL"]
+            KafkaExt["Kafka"]
         end
     end
     
-    NGINX --> API_Pod1
-    NGINX --> API_Pod2
-    NGINX --> API_Pod3
+    User["用户"] -->|HTTPS| Ingress
+    Ingress --> Svc
+    Svc --> Deploy
+    Deploy --> HPA
     
-    API_Pod1 --> Redis_SVC
-    API_Pod2 --> Redis_SVC
-    API_Pod3 --> Redis_SVC
+    Deploy --> RedisExt
+    Deploy --> PGExt
+    Deploy --> KafkaExt
     
-    API_Pod1 --> PG_SVC
-    API_Pod2 --> PG_SVC
-    API_Pod3 --> PG_SVC
-    
-    API_Pod1 --> Milvus_SVC
-    API_Pod2 --> Milvus_SVC
-    
-    Worker_Pod1 --> Redis_SVC
-    Worker_Pod1 --> PG_SVC
-    Worker_Pod2 --> Redis_SVC
-    Worker_Pod2 --> PG_SVC
+    style VPC fill:#f9f
+    style Deploy fill:#bfb
+    style HPA fill:#ff9
 ```
 
-**部署拓扑**：
+#### 5.2.2 冗余策略
 
-| 组件 | 副本数 | 资源请求 | 资源限制 |
-|------|--------|----------|----------|
-| API Server | 3 | 2CPU, 4GB | 4CPU, 8GB |
-| Worker | 2 | 1CPU, 2GB | 2CPU, 4GB |
-| Redis | 3(集群) | 1CPU, 4GB | 2CPU, 8GB |
-| PostgreSQL | 主从 | 2CPU, 8GB | 4CPU, 16GB |
-| Milvus | 3节点 | 4CPU, 16GB | 8CPU, 32GB |
+| 组件 | 冗余方式 | 副本数 | 故障转移 |
+|------|----------|--------|----------|
+| CE服务 | Kubernetes Deployment | 3 | 自动 |
+| Redis | Cluster模式 | 6节点 | 自动 |
+| PostgreSQL | 主从复制 | 1主2从 | 自动 |
+| Kafka | 多分区多副本 | 3 broker | 自动 |
 
-**高可用策略**：
+#### 5.2.3 网络配置
 
-- **API层**: 3副本 + HPA + 负载均衡
-- **Redis**: 3节点哨兵模式
-- **PostgreSQL**: 1主2从流复制
-- **Milvus**: 3节点集群
-
----
-
-## 六、架构决策记录(ADR)
-
-### ADR-001: 采用混合压缩策略
-
-| 属性 | 值 |
-|------|-----|
-| 状态 | 已通过 |
-| 决策者 | 架构团队 |
-| 决策日期 | 2025-01-15 |
-
-**背景**: 
-单一压缩策略无法满足所有场景需求。摘要策略会丢失细节，选择策略可能遗漏关键信息。
-
-**决策**:
-采用分层混合压缩策略：
-1. 近期消息（窗口内）→ 保留完整
-2. 中期消息 → 选择性保留
-3. 早期消息 → 摘要压缩
-
-**后果**:
-- 正面：平衡信息完整性与token使用
-- 负面：实现复杂度增加
-
-### ADR-002: 使用向量检索增强记忆
-
-| 属性 | 值 |
-|------|-----|
-| 状态 | 已通过 |
-| 决策者 | 架构团队 |
-| 决策日期 | 2025-01-16 |
-
-**背景**:
-传统关键词匹配无法理解语义，用户意图与历史对话表述差异导致检索失败。
-
-**决策**:
-引入向量语义检索：
-1. 使用Text-Embedding-Ada-002生成嵌入
-2. 存储到Milvus向量数据库
-3. 检索时使用语义相似度排序
-
-**后果**:
-- 正面：语义理解增强，检索准确率提升
-- 负面：额外向量存储和计算成本
-
-### ADR-003: 工具调用采用有向无环图编排
-
-| 属性 | 值 |
-|------|-----|
-| 状态 | 已通过 |
-| 决策者 | 架构团队 |
-| 决策日期 | 2025-01-17 |
-
-**背景**:
-复杂任务可能需要多工具顺序/并行调用，需要统一编排。
-
-**决策**:
-采用DAG编排器：
-1. LLM输出工具调用计划
-2. 构建工具调用DAG
-3. 拓扑排序执行
-4. 结果汇总返回LLM
-
-**后果**:
-- 正面：支持复杂工具链，错误可追溯
-- 负面：执行时间可能增加
-
----
-
-## 七、附录
-
-### 附录A: API接口定义
-
-```yaml
-openapi: 3.0.0
-info:
-  title: Context Engineering System API
-  version: 1.0.0
-
-paths:
-  /api/v1/sessions:
-    post:
-      summary: 创建新会话
-      responses:
-        '201':
-          description: 会话创建成功
-          
-  /api/v1/sessions/{session_id}/messages:
-    post:
-      summary: 发送消息
-      parameters:
-        - name: session_id
-          in: path
-          required: true
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                content:
-                  type: string
-    get:
-      summary: 获取会话历史
-      
-  /api/v1/sessions/{session_id}/compress:
-    post:
-      summary: 手动触发压缩
-```
-
-### 附录B: 配置示例
-
-```yaml
-# config.yaml
-system:
-  name: context-engineering
-  version: 1.0.0
-  
-context:
-  max_tokens: 128000
-  compression_threshold: 110000
-  compression_strategy: hierarchical
-  
-memory:
-  enabled: true
-  vector_store: milvus
-  top_k: 5
-  importance_threshold: 0.7
-  
-tools:
-  enabled: true
-  max_parallel: 3
-  timeout: 30
-  retry_count: 2
-  
-storage:
-  redis:
-    host: redis-cluster
-    port: 6379
-  postgres:
-    host: postgres-master
-    port: 5432
+```mermaid
+graph LR
+    subgraph "内部网络"
+        K8S["K8s集群\n10.0.0.0/16"]
+        
+        subgraph "服务网络"
+            CE["CE服务\n10.0.1.0/24"]
+            OTHER["其他服务\n10.0.2.0/24"]
+        end
+        
+        subgraph "数据网络"
+            RedisNet["Redis\n10.0.10.0/24"]
+            PGNet["PostgreSQL\n10.0.11.0/24"]
+            KafkaNet["Kafka\n10.0.12.0/24"]
+        end
+    end
     
-llm:
-  provider: openai
-  model: gpt-4-turbo
-  temperature: 0.7
+    subgraph "外部网络"
+        Public["公网\n0.0.0.0/0"]
+    end
+    
+    Public -->|HTTPS 443| CE
+    CE --> RedisNet
+    CE --> PGNet
+    CE --> KafkaNet
+    CE <--> OTHER
 ```
 
 ---
 
-## 文档版本历史
+## 附录：架构决策记录 (ADR)
+
+### ADR-001: 采用分层架构设计上下文工程服务
+
+**状态**: 已通过
+
+**背景**: 上下文工程需要处理多种类型的上下文（历史对话、工具输出、长期记忆），需要清晰的职责划分。
+
+**决策**: 采用四层架构（接口层、管理层、数据层、基础组件层）
+
+**影响**:
+- 正面：职责清晰、易于维护、便于测试
+- 负面：增加系统复杂度、可能带来性能开销
+
+### ADR-002: 采用事件驱动处理新对话通知
+
+**状态**: 已通过
+
+**背景**: 长期记忆服务写入对话后需要通知上下文工程进行上下文管理处理。
+
+**决策**: 使用Kafka消息队列实现异步事件通知
+
+**影响**:
+- 正面：解耦、异步处理、高可用
+- 负面：增加系统复杂性、需要处理消息一致性
+
+### ADR-003: 支持多种压缩策略
+
+**状态**: 已通过
+
+**背景**: 不同场景对上下文压缩的需求不同，需要灵活选择。
+
+**决策**: 定义CompressionStrategy接口，支持Summarization、Truncation、Importance三种策略
+
+**影响**:
+- 正面：灵活、可扩展
+- 负面：需要管理策略选择逻辑
+
+### ADR-004: 上下文按Agent隔离
+
+**状态**: 已通过
+
+**背景**: 跨Agent的上下文需要隔离，避免信息泄露。
+
+**决策**: 每个Agent维护独立的上下文窗口，使用agent_id作为隔离标识
+
+**影响**:
+- 正面：安全、隔离性好
+- 负面：资源占用增加
+
+### ADR-005: 使用Redis作为上下文缓存
+
+**状态**: 已通过
+
+**背景**: 上下文访问频繁，需要高速缓存。
+
+**决策**: 使用Redis Cluster作为分布式缓存
+
+**影响**:
+- 正面：高性能、支持分布式
+- 负面：需要维护Redis集群
+
+---
+
+## 版本历史
 
 | 版本 | 日期 | 作者 | 变更说明 |
 |------|------|------|----------|
-| 1.0.0 | 2025-01-20 | 架构团队 | 初始版本 |
+| v1.0.0 | 2024-01-01 | 架构团队 | 初始版本 |
 
 ---
 
-*本文档由Context Engineering System架构团队编写，遵循Kruchten 4+1视图方法论，可直接指导开发团队进行代码实现。* 
+*本文档为上下文工程架构设计稿，需要经过评审后正式发布。* 
