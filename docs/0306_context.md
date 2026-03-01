@@ -155,7 +155,7 @@ graph TD
     MHEntray--> History
 ```
 
-**格式示例**
+### 格式示例
 {
   "request_meta": {
     "request_id": "req-20260227-travelshop",
@@ -282,7 +282,8 @@ graph TD
   }
 }
 
-结构化上下文使用说明（待讨论优化）
+
+### 结构化上下文使用说明（待讨论优化）
 1. 意图识别层 (RouterLayer) & 编排器 (Orchestrator)
 通过读取 2_entity_and_index_info.domain_indexes，路由层可以直接获得业务线的上帝视角：
 
