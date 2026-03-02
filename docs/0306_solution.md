@@ -966,3 +966,42 @@ context_get_waiters_count{session_id="*"} > 20 持续 2 分钟
 - 返回的 `rendered_prompt` 可直接用于模型调用。
 - 多意图请求在上下文中保留意图列表与 skill/tool 状态。
 - 全链路可通过 `request_id/session_id/context_id` 追踪。
+
+## 9. 实现需求清单与工作量评估
+
+### 9.1 评估口径与假设
+- 计量单位：`人天`（1 人天 = 1 名熟悉项目的后端工程师 1 天有效开发时间）。
+- 范围包含：需求实现、联调、测试、文档更新。
+- 范围不包含：跨团队外部系统改造排期（如 `agentgov`、`KMM`、`RAG` 服务侧改造）。
+- 默认前提：网关框架、任务队列、Redis、DB、基础监控能力可复用。
+
+### 9.2 需求列表与工作量
+
+| 模块 | 需求项 | 关键交付 | 估算（人天） |
+|------|--------|----------|--------------|
+| A. 接口层 | `context/init` 实现 | 参数校验、`agentgov` 拉取 flow、`requires_context` 解析、实例落库与返回 | 3 |
+| A. 接口层 | `context/write` 实现 | 幂等控制、`agent/session/task` 三级写入、主写入+异步入队原子性 | 3 |
+| A. 接口层 | `context/get` 实现 | 阻塞等待、超时/降级返回、上下文装填与 `rendered_prompt` 输出 | 4 |
+| B. 数据模型 | `dynamic_context_store` 建模 | Redis 主记录/字段状态/版本号结构，DB 持久化表结构与 DAO | 3 |
+| B. 数据模型 | workflow 关联模型 | `context_instance`、`workflow_instance`、`node_contract` 三表与索引 | 2 |
+| C. 异步编排 | `dynamic_param_build` DAG | `J1~J5` 并行编排、barrier 聚合、字段级状态流转 | 4 |
+| C. 异步编排 | 重试与失败策略 | 字段级重试、超时处理、必选字段失败判定与降级策略 | 2 |
+| D. 等待与唤醒 | Waiter 机制实现 | 等待者注册/反注册、`required_fields` 判定、PubSub 通知唤醒 | 4 |
+| D. 等待与唤醒 | 轮询降级与退避 | PubSub 故障回退轮询（200ms 指数退避至 1s） | 1.5 |
+| D. 稳定性 | 背压与熔断 | 单会话并发等待上限、`CTX_4290`、超时率熔断 `CTX_5030` | 2 |
+| E. Prompt 装填 | 模板中心接入与裁剪 | `prompt_profile` 模板读取、token budget 分配与超预算裁剪 | 2 |
+| E. 检索能力 | 历史相关性双路径 | RAG 召回 + LLM 判定融合重排 | 3 |
+| E. 外部集成 | KMM/RAG 适配 | query 改写、`memory_info` 规范化、外部超时隔离与错误映射 | 2 |
+| F. 可观测性 | 指标/日志/追踪 | 核心 SLI 指标、事件日志、按 `request_id/session_id/context_id` 追踪 | 2 |
+| F. 错误治理 | 错误码落地 | `CTX_*` 统一错误模型、`failed_fields` 细节返回 | 1.5 |
+| G. 测试验收 | 测试体系 | 单测、集成测试、并发与超时场景压测、回归测试 | 5 |
+| G. 交付保障 | 发布与回滚 | 灰度开关、兼容方案、故障回滚与运行手册 | 1.5 |
+
+### 9.3 总体工作量汇总
+- MVP（不含熔断、历史双路径融合、完整可观测性闭环）：`18 ~ 22` 人天。
+- 完整版（覆盖本文档全部能力与验收项）：`38 ~ 45` 人天。
+
+### 9.4 建议排期（2 人并行）
+1. 第 1 周：接口层 + 数据模型 + 异步主链路（`context/init`、`context/write`、`dynamic_param_build`）。
+2. 第 2 周：`context/get` 阻塞等待、并发控制、Prompt 装填与 token 裁剪。
+3. 第 3 周：可观测性、错误治理、全链路联调、压测与验收。
